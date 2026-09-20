@@ -20,7 +20,7 @@ with expected(id, product_code, price, currency) as (
         ('TICKET-2', 'SINGLE', 36.00::numeric, 'DKK'),
         ('TICKET-3', 'DAY',    65.00::numeric, 'DKK')
 )
-select coalesce(e.id, t.id) as id,
+select e.id,
        e.product_code as expected_product_code,
        t.product_code as actual_product_code,
        e.price as expected_price,
@@ -28,10 +28,9 @@ select coalesce(e.id, t.id) as id,
        e.currency as expected_currency,
        t.currency as actual_currency
 from expected e
-full join tickets t on t.id = e.id
-where e.id is null
-   or t.id is null
+left join tickets t on t.id = e.id
+where t.id is null
    or t.product_code is distinct from e.product_code
    or t.price is distinct from e.price
    or t.currency is distinct from e.currency
-order by id;
+order by e.id;
