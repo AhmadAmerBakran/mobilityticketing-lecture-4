@@ -1,0 +1,123 @@
+name: Lecture 4 database lab
+
+on:
+  push:
+    branches:
+      - rolling-product-identity
+  pull_request:
+
+jobs:
+  migration-lab:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start PostgreSQL
+        run: docker compose up -d --wait
+
+      - name: Run the lab sequence
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          run_sql() {
+            docker compose exec -T postgres psql -U mobility -d mobility -v ON_ERROR_STOP=1 "$@"
+          }
+
+          run_sql < database/postgres/experiments/lecture04/baseline.sql
+
+          if run_sql < database/postgres/experiments/lecture04/unsafe_change.sql; then
+            echo "Unsafe change was expected to fail"
+            exit 1
+          fi
+
+          run_sql < database/postgres/experiments/lecture04/old_reader.sql
+
+          docker compose down -v
+          docker compose up -d --wait
+          run_sql < database/postgres/experiments/lecture04/baseline.sql
+
+          run_sql < database/postgres/migrations/030_expand_product_identity.sql
+
+          run_sql -v ticket_id=LAB04-OLD-1 -v ticket_code=LAB04-CODE-OLD-1 \
+            < database/postgres/experiments/lecture04/old_writer.sql
+          run_sql < database/postgres/experiments/lecture04/old_reader.sql
+          run_sql < database/postgres/experiments/lecture04/new_reader.sql
+
+          run_sql -v ticket_id=LAB04-NEW-1 -v ticket_code=LAB04-CODE-NEW-1 \
+            < database/postgres/experiments/lecture04/new_writer.sql
+
+          run_sql -v ticket_id=LAB04-NEW-CONFLICT -v ticket_code=LAB04-CODE-NEW-CONFLICT \
+            -v caller_product_code=DAY \
+            < database/postgres/experiments/lecture04/new_writer.sql
+
+          stored_code=$(run_sql -Atc "select product_code from tickets where id='LAB04-NEW-CONFLICT'")
+          test "$stored_code" = "SINGLE"
+
+          run_sql -v ticket_id=LAB04-NEW-UNKNOWN -v ticket_code=LAB04-CODE-NEW-UNKNOWN \
+            -v product_id=00000000-0000-0000-0000-000000000000 \
+            < database/postgres/experiments/lecture04/new_writer.sql
+          unknown_count=$(run_sql -Atc "select count(*) from tickets where id='LAB04-NEW-UNKNOWN'")
+          test "$unknown_count" = "0"
+
+          unresolved=$(run_sql -Atc "select count(*) from tickets t left join products pn on pn.id=t.product_id left join products po on t.product_id is null and po.code=t.product_code where coalesce(pn.id,po.id) is null")
+          test "$unresolved" = "0"
+
+          first_backfill=$(run_sql < database/postgres/migrations/031_backfill_ticket_product.sql)
+          echo "$first_backfill"
+          grep -q "UPDATE 4" <<< "$first_backfill"
+
+          second_backfill=$(run_sql < database/postgres/migrations/031_backfill_ticket_product.sql)
+          echo "$second_backfill"
+          grep -q "UPDATE 0" <<< "$second_backfill"
+
+          run_sql -v ticket_id=LAB04-OLD-LATE -v ticket_code=LAB04-CODE-OLD-LATE \
+            < database/postgres/experiments/lecture04/old_writer.sql
+          late_backfill=$(run_sql < database/postgres/migrations/031_backfill_ticket_product.sql)
+          echo "$late_backfill"
+          grep -q "UPDATE 1" <<< "$late_backfill"
+
+          run_sql < database/postgres/experiments/lecture04/verify.sql
+          historical_ok=$(run_sql -Atc "select price=65.00 and currency='DKK' and product_code='DAY' from tickets where id='TICKET-3'")
+          test "$historical_ok" = "t"
+          catalogue_ok=$(run_sql -Atc "select price=80.00 from products where code='DAY'")
+          test "$catalogue_ok" = "t"
+
+          run_sql < database/postgres/experiments/lecture04/mismatch_test.sql
+
+          run_sql -v ticket_id=LAB04-NULL-BLOCK -v ticket_code=LAB04-CODE-NULL-BLOCK \
+            < database/postgres/experiments/lecture04/old_writer.sql
+
+          if run_sql < database/postgres/migrations/032_require_ticket_product.sql; then
+            echo "product_id should not become required while a null row exists"
+            exit 1
+          fi
+
+          final_backfill=$(run_sql < database/postgres/migrations/031_backfill_ticket_product.sql)
+          echo "$final_backfill"
+          grep -q "UPDATE 1" <<< "$final_backfill"
+          run_sql < database/postgres/experiments/lecture04/verify.sql
+          run_sql < database/postgres/migrations/032_require_ticket_product.sql
+
+          if run_sql -v ticket_id=LAB04-OLD-AFTER -v ticket_code=LAB04-CODE-OLD-AFTER \
+            < database/postgres/experiments/lecture04/old_writer.sql; then
+            echo "Old writer should fail after product_id becomes required"
+            exit 1
+          fi
+
+          run_sql < database/postgres/experiments/lecture04/final_reader.sql
+
+          if run_sql -v ticket_id=LAB04-ID-ONLY-BEFORE -v ticket_code=LAB04-CODE-ID-ONLY-BEFORE \
+            < database/postgres/experiments/lecture04/final_writer.sql; then
+            echo "ID-only writer should fail while product_code is still required"
+            exit 1
+          fi
+
+          run_sql < database/postgres/experiments/lecture04/remove_legacy.sql
+
+          old_column=$(run_sql -Atc "select count(*) from information_schema.columns where table_schema='public' and table_name='tickets' and column_name='product_code'")
+          test "$old_column" = "1"
+
+      - name: Stop PostgreSQL
+        if: always()
+        run: docker compose down -v
