@@ -98,3 +98,7 @@ A UUID default only controls new rows. It does not make an existing product ID i
 ## Migration-tool check
 
 This repository does not use EF Core, so there is no project-generated migration SQL to inspect. A model diff can work out the new UUID columns, keys and the final removal of `tickets.product_code`. It cannot infer the safe rollout order from the final model alone: the dual-write period, matching old rows by product code, preserving the ticket price, waiting for old writers to stop, and deciding when the old column may be removed all depend on the existing data and running application versions.
+
+## Automated check
+
+The GitHub Actions job runs the same sequence against PostgreSQL 17. It checks the expected unsafe-drop failure, the repeatable backfill, the blocked `NOT NULL` change while a null reference exists, the old-writer failure after the ID becomes required, the 65 DKK historical DAY price, and the reversible old-column drop rehearsal.
